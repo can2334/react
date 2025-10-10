@@ -1,0 +1,119 @@
+/* Header container */
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 20px;
+    background-color: #121212;
+    /* koyu siyah */
+    color: #e0e0e0;
+    position: relative;
+    font-family: Arial, sans-serif;
+}
+
+/* Menü linkleri */
+.menu-links {
+    display: flex;
+    gap: 20px;
+    align-items: center;
+}
+
+header .menu-links a {
+    color: #e0e0e0;
+    text-decoration: none;
+    font-weight: bold;
+}
+
+header .menu-links a:hover {
+    text-decoration: underline;
+    color: #00bfa5;
+}
+
+/* Dropdown container */
+.dropdown-container {
+    position: relative;
+    cursor: pointer;
+}
+
+.dropdown-toggle {
+    user-select: none;
+    color: #e0e0e0;
+    font-weight: bold;
+}
+
+/* Dropdown menü */
+.dropdown-menu {
+    position: absolute;
+    top: 30px;
+    left: 0;
+    background: #1c1c1c;
+    /* koyu siyah */
+    border: 1px solid #333;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    padding: 5px 0;
+    z-index: 1000;
+    min-width: 150px;
+}
+
+.dropdown-menu a {
+    padding: 8px 15px;
+    text-decoration: none;
+    color: #e0e0e0;
+    transition: background 0.2s, color 0.2s;
+}
+
+.dropdown-menu a:hover {
+    background: #00bfa5;
+    /* hover yeşili */
+    color: #121212;
+}
+
+/* Profil container */
+.profile-container {
+    position: relative;
+    cursor: pointer;
+}
+
+.profile-img {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid #e0e0e0;
+}
+
+.profile-dropdown {
+    position: absolute;
+    right: 0;
+    top: 50px;
+    background: #1c1c1c;
+    /* koyu siyah */
+    color: #e0e0e0;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    min-width: 140px;
+    z-index: 1000;
+}
+
+.profile-dropdown a,
+.profile-dropdown button {
+    padding: 10px;
+    border: none;
+    background: none;
+    text-align: left;
+    width: 100%;
+    cursor: pointer;
+    color: #e0e0e0;
+    transition: background 0.2s, color 0.2s;
+}
+
+.profile-dropdown a:hover,
+.profile-dropdown button:hover {
+    background-color: #00bfa5;
+    color: #121212;
+}

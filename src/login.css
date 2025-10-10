@@ -1,0 +1,62 @@
+/* Genel container */
+.login-container {
+    max-width: 400px;
+    margin: 80px auto;
+    padding: 30px 25px;
+    background: linear-gradient(145deg, #e0f7fa, #b2ebf2);
+    border-radius: 20px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+    font-family: 'Arial', sans-serif;
+    text-align: center;
+}
+
+/* Başlık */
+.login-container h2 {
+    color: #00796b;
+    font-size: 2rem;
+    margin-bottom: 25px;
+}
+
+/* Form */
+.login-form {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+/* Input */
+.login-input {
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid #00796b;
+    outline: none;
+    font-size: 1rem;
+}
+
+.login-input:focus {
+    box-shadow: 0 0 5px #26a69a;
+}
+
+/* Buton */
+.login-btn {
+    padding: 10px;
+    border: none;
+    border-radius: 8px;
+    background-color: #26a69a;
+    color: white;
+    font-weight: bold;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: 0.2s;
+}
+
+.login-btn:hover {
+    background-color: #00796b;
+}
+
+/* Hata mesajı */
+.login-error {
+    color: #ef5350;
+    margin-top: 10px;
+    font-weight: bold;
+}
