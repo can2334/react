@@ -25,19 +25,12 @@ const generateRandomString = (length = 32) => {
     return crypto.randomBytes(length).toString('hex');
 };
 
-const clients = []; // Başlangıçta boş bir dizi olmalı.
-
-// Eski: function getClientByUserId(userId) { ... }
-// Yeni:
+const clients = [];
 
 function getClientByUserId(userId) {
-    // DÜZELTME: Karşılaştırmadan önce userId'yi string'e çevir.
-    const targetId = userId.toString();
-    // `clients` dizisi artık boş başladığı için bu arama güvenli.
-    return clients.find(c => c.userId?.toString() === targetId) || null;
+    return clients.find(c => c.userId === userId) || null;
 };
 
-// addClient fonksiyonunu da temizleyelim (clients'ın doğru tanımlandığını varsayarak)
 function addClient(client) {
     const exClientIndex = clients.findIndex(c => c.userId === client.userId);
 
@@ -55,21 +48,19 @@ function sendJSON(client, obj) {
 };
 
 // tüm bağlı olan kullanıcılara mesaj atmak için kullanılabilir. Bu akışta şu an kullanılmıyor.
-function broadcast(obj) {
+function broadcast(dict) {
+    if (client.length === 0) return;
     for (const client of clients) {
-        sendJSON(client, obj);
+        sendJSON(client.res, dict);
     }
 };
 
 function parseCookie(cookieString) {
     const result = {};
-    console.log("cookieString: ", cookieString);
     if (!cookieString || typeof cookieString !== "string") return result;
 
     const cookies = cookieString.split(";");
-    console.log("spliced cookie: ", cookies);
     for (const cookie of cookies) {
-        console.log("COOKİE", cookie)
         const [key, value] = cookie.trim().split("=");
         result[key] = value;
     }
@@ -103,11 +94,9 @@ app.get("/socket", async (req, res) => {
         "Access-Control-Allow-Origin": "*"
     });
     const token = req.query.token;
-    console.log("Yeni SSE istek!");
-    res.write(`data: ${JSON.stringify({ message: "baglisin" })}\n\n`);
+    res.write(`data: baglisin\n\n`);
     try {
         if (!token) return res.end();
-        console.log("req.cookies.token", token)
         const [rowsBySession] = await db.query(
             "SELECT * FROM sessions WHERE token = ?",
             [token]
@@ -127,12 +116,6 @@ app.get("/socket", async (req, res) => {
 
             console.log("Client ayrıldı. Toplam:", clients.length);
         });
-        // setInterval(() => {
-        //     for (let client of clients) {
-        //         if (!client?.res) continue;
-        //         sendJSON(client.res, { types: "ping" });
-        //     }
-        // }, 200)
     } catch (e) {
         console.error(e)
     }
@@ -311,6 +294,21 @@ app.post("/messages", async (req, res) => {
     }
 });
 
+app.post("/read_message", async (req, res) => {
+    const { sender_id, cookie } = req.body;
+    const cookies = parseCookie(cookie);
+    if (!cookies?.token) return res.status(408).json({ error: "Kullanıcı oturumu bulunamadı" });
+    const [rowsBySession] = await db.query(
+        "SELECT * FROM sessions WHERE token = ?",
+        [cookies.token]
+    )
+    if (!rowsBySession?.[0] || !rowsBySession[0]?.userId) return res.status(408).json({ error: "Kullanıcı oturumu bulunamadı" });
+    const otherId = rowsBySession[0].userId;
+    console.log("sender_id", sender_id, "otherId", otherId);
+    await db.query("UPDATE messages SET is_read = 1 WHERE receiver_id = ? AND sender_id = ? AND is_read = 0", [otherId, sender_id]);
+    res.json({ success: true });
+});
+
 // post isteği atılırken bu satır eklenmeli "credentials: 'include'"
 app.post("/send_message", async (req, res) => {
     console.log("send post")
@@ -331,24 +329,15 @@ app.post("/send_message", async (req, res) => {
             [rowsBySession[0].userId, receiver_id, message]
         );
         console.log("rowsBySession[0].userId", receiver_id);
-
-        // receiver_id'nin tipini kontrol etmek için. MySQL'den gelen userId number, req.body'den gelen receiver_id string/number olabilir.
-        // getClientByUserId zaten toString() ile karşılaştırdığı için receiver_id'yi değiştirmeye gerek yok.
         const receiverClient = getClientByUserId(receiver_id);
-
         if (receiverClient) {
             console.log("alıcı client bulundu");
-
-            // 💡 KRİTİK DÜZELTME: Mesajı gönderirken, mesaja bir ID eklemek, client tarafının
-            // mesajları ilk yüklemede ve anlık yüklemede ayırt etmesini kolaylaştırır.
-            // Ama şimdilik sadece gönderen ID'lerinin doğru olduğundan emin olalım.
             sendJSON(receiverClient.res, {
-                sender_id: rowsBySession[0].userId, // Bu number (veya MySQL'den gelen tip)
-                receiver_id: Number(receiver_id),   // Bu da number olmalı
+                sender_id: rowsBySession[0].userId,
+                receiver_id,
                 text: message
             });
         }
-        // ...
 
         res.json({ sender_id: rowsBySession[0].userId, receiver_id, text: message });
     } catch (err) {

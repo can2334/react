@@ -31,10 +31,23 @@ const getCookie = (name: string): string | null => {
     return null;
 };
 
-// Bu fonksiyon kullanılmadığı için sadeleştirildi, ancak korunabilir.
-// const generateUserId = (): string => {
-//     return `user_${Math.random().toString(36).substr(2, 9)}_${Date.now()}`;
-// };
+const logOut = () => {
+    setCookie("token", "", -1);
+    localStorage.removeItem("user");
+    window.location.replace("/login");
+    window.location.reload();
+};
+
+// Sunucuya o göndericiden gelen TÜM okunmamış mesajları okundu yapması için istek gönderir.
+const readMessage = (senderId: string | number) => {
+    fetch(`${API_URL}/read_message`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // Sunucu tarafının bu senderId'yi alıp, receiver_id = SİZ ve sender_id = senderId olan 
+        // TÜM mesajları is_read = 1 yapması gerekir.
+        body: JSON.stringify({ sender_id: senderId, cookie: document.cookie }),
+    });
+};
 
 const API_URL = "http://localhost:5000";
 
@@ -42,6 +55,7 @@ const ChatButton: React.FC = () => {
     const [chatOpen, setChatOpen] = useState(false);
     const [currentUserId, setCurrentUserId] = useState<string>("");
     const [selectedUser, setSelectedUser] = useState<User | null>(null);
+    const selectedUserRef = useRef<User | null>(null);
     const [messageInput, setMessageInput] = useState("");
     const [messages, setMessages] = useState<Message[]>([]);
     const [showUserSelector, setShowUserSelector] = useState(false);
@@ -49,25 +63,44 @@ const ChatButton: React.FC = () => {
     const [availableUsers, setAvailableUsers] = useState<User[]>([]);
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
+    // ✨ YENİ: selectedUser state'i her değiştiğinde selectedUserRef.current'i günceller
+    // Bu, SSE bloğunun her zaman güncel selectedUser'ı görmesini sağlar (Kapanış/Closure sorunu çözümü).
+    useEffect(() => {
+        selectedUserRef.current = selectedUser;
+    }, [selectedUser]);
+
+    // 🛑 ESKİ HATALI useEffect KALDIRILDI. (State mutasyonu ve sonsuz döngü riski taşıyordu.)
+
     // #1 Kullanıcı ID'sini çek (Önce çalışmalı)
     // ----------------- Kullanıcı ID -----------------
     useEffect(() => {
+        console.log("Cookies:", document.cookie);
+
         fetch(`${API_URL}/me`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ cookie: document.cookie }),
         })
-            .then(res => res.json())
-            .then(data => {
-                const fetchedId = data[0]?.id;
+            .then(async res => {
+                if (res.status !== 200) {
+                    console.log("Status:", res.status, "-> logout");
+                    logOut();
+                    return;
+                }
 
-                // 💡 KRİTİK DÜZELTME: ID'yi var olduğunda string'e zorla
+                const data = await res.json();
+                const fetchedId = data?.[0]?.id;
+
                 if (fetchedId) {
-                    setCurrentUserId(fetchedId.toString());
-                    console.log("Kullanıcı ID yüklendi:", fetchedId.toString()); // Kontrol et
+                    setCurrentUserId(String(fetchedId));
+                } else {
+                    logOut();
                 }
             })
-            .catch(err => console.error("Kullanıcı ID alınamadı:", err));
+            .catch(err => {
+                logOut();
+            });
+
     }, []);
 
     // #2 Kullanıcıları çek (currentUserId yüklendikten sonra çalışmalı)
@@ -85,37 +118,42 @@ const ChatButton: React.FC = () => {
             .catch(err => console.error("Kullanıcılar alınamadı:", err));
     }, [currentUserId]); // currentUserId yüklendiğinde tekrar çalış
 
-    // #3 SSE Bağlantısı (Mesajları Anlık Al)
+    // #3 SSE Bağlantısı (Mesajları Anlık Al) - OKUNDU MANTIĞI EKLENDİ
     useEffect(() => {
         if (!currentUserId) return;
         const token = getCookie("token");
         const ev = new EventSource(`${API_URL}/socket?token=${token}`);
 
-        // chatbuttons.tsx ~115. satır civarı (#3 SSE Bağlantısı içindeki ev.onmessage)
-
         ev.onmessage = (event) => {
-            // 🔥 Bu konsolu hata ayıklama bittiğinde silebilirsin
-            // console.log("🔥 SSE'den Gelen HAM Veri:", event.data); 
+            const currentSelectedUser = selectedUserRef.current; // Ref'ten güncel değeri çek
 
-            // Düz metinleri JSON'a çevirmeye çalış
             try {
                 const data = JSON.parse(event.data);
 
-                // 1. KRİTİK KONTROL: Eğer gelen mesaj sadece bağlantı bildirimi ise (baglisin), işleme devam etme.
                 if (data.message === "baglisin") {
-                    // console.log("SSE Bağlantısı başarılı: baglisin");
                     return;
                 }
 
-                // 2. Gelen verinin bir mesaj objesi olduğundan emin ol (text, sender_id ve receiver_id alanları olmalı)
                 if (!data || !data.text || !data.sender_id || !data.receiver_id) {
-                    // Bu uyarı, sadece "baglisin" olmayan, ama eksik alanlı garip veriler gelirse görünür.
                     console.warn("SSE: Gelen veri eksik/mesaj değil:", data);
                     return;
                 }
 
+                let messageToAdd = data;
+
+                // Eğer mesaj seçili kullanıcıdan geliyorsa VE alıcı biz isek
+                if (currentSelectedUser?.id.toString() === data.sender_id.toString() && data.receiver_id.toString() === currentUserId) {
+
+                    // 1. Backend'e okundu bilgisini gönder (Bu, o kullanıcıdan gelen TÜM mesajları okundu yapar)
+                    readMessage(data.sender_id);
+
+                    // 2. Client'ta okundu olarak göster (Immutable)
+                    messageToAdd = { ...data, is_read: 1 };
+                }
+
+
                 // 3. Her gelen DOĞRU formatlı mesajı koşulsuz olarak global state'e ekle
-                setMessages(prev => [...prev, data]);
+                setMessages(prev => [...prev, messageToAdd]);
 
             } catch (e) {
                 // console.error("SSE JSON Parse error:", e, "Veri:", event.data);
@@ -132,9 +170,9 @@ const ChatButton: React.FC = () => {
             ev.close();
         };
 
-    }, [currentUserId]); // selectedUser'ı dependency'den kaldırdık, çünkü mesajı koşulsuz ekliyoruz.
+    }, [currentUserId]);
 
-    // #4 Mesajları Çek (İlk Yükleme)
+    // #4 Mesajları Çek (İlk Yükleme) - OKUNDU MANTIĞI EKLENDİ
     useEffect(() => {
         if (!selectedUser || !currentUserId) return;
 
@@ -147,7 +185,22 @@ const ChatButton: React.FC = () => {
             }),
         })
             .then(res => res.json())
-            .then(data => setMessages(data))
+            .then(data => {
+                // 1. Backend'e okundu bilgisini gönder (Bu, o kullanıcıdan gelen TÜM mesajları okundu yapar)
+                readMessage(selectedUser.id);
+
+                // 2. Client tarafında, sadece bize gelen ve okunmamış mesajları okundu olarak işaretle (Immutable güncelleme)
+                const updatedData = data.map((msg: Message) => {
+                    // Alıcı biziz VE gönderici seçili kullanıcı İSE VE okunmamışsa
+                    if (msg.receiver_id?.toString() === currentUserId && msg.sender_id?.toString() === selectedUser.id.toString() && !msg.is_read) {
+                        // Yeni obje oluşturarak mutasyonu önle
+                        return { ...msg, is_read: 1 };
+                    }
+                    return msg;
+                });
+
+                setMessages(updatedData); // Yeni, güncellenmiş diziyi state'e ata
+            })
             .catch(err => console.error("Mesajlar alınamadı:", err));
     }, [selectedUser, currentUserId]);
 
@@ -179,7 +232,6 @@ const ChatButton: React.FC = () => {
             .catch(err => console.error("Mesaj gönderilemedi:", err));
     };
 
-    // ----------------- Mesaj filtreleme (SORUNUN KAYNAĞI) -----------------
     // Bu kısım, selectedUser veya currentUserId değiştiğinde otomatik olarak yeniden hesaplanır.
     const filteredMessages = messages.filter(
         msg => {
@@ -205,8 +257,17 @@ const ChatButton: React.FC = () => {
 
     // ----------------- Kullanıcı seç -----------------
     const selectNewUser = (user: User) => {
-        if (!activeChats.find(u => u.id === user.id)) setActiveChats(prev => [...prev, user]);
+        console.log("Kullanıcı seçildi:", user);
+
+        // 1. Kullanıcıyı aktif sohbetlere ekle
+        if (!activeChats.find(u => u.id === user.id)) {
+            setActiveChats(prev => [...prev, user]);
+        }
+
+        // 2. Seçili kullanıcıyı ayarla
         setSelectedUser(user);
+
+        // 3. Kullanıcı seçiciyi kapat
         setShowUserSelector(false);
     };
 

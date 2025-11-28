@@ -24,7 +24,7 @@ export const Login: React.FC = () => {
                 localStorage.setItem("user", JSON.stringify(data.user));
                 if (!data?.user?.token) return setError("Sunucuda bir hata oluştu. Lütfen daha sonra tekrar deneyiniz.");
                 document.cookie = "token=" + data.user.token + ";";
-                navigate("/home");
+                return navigate("/home");
             } else {
                 setError(data.error || "Hatalı kullanıcı adı veya şifre");
             };
