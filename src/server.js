@@ -5,15 +5,12 @@ const cookieParser = require('cookie-parser');
 const app = express();
 const crypto = require('crypto');
 app.use(cors());
-// app.use(cors({
-//     origin: "http://localhost:3000",
-//     credentials: true
-// }));
 
 app.use(cookieParser());
 app.use(express.json());
 
-// 🔗 MySQL bağlantısı
+const clients = [];
+
 const db = mysql.createPool({
     host: "localhost",
     user: "root",
@@ -25,7 +22,6 @@ const generateRandomString = (length = 32) => {
     return crypto.randomBytes(length).toString('hex');
 };
 
-const clients = [];
 
 function getClientByUserId(userId) {
     return clients.find(c => c.userId === userId) || null;
@@ -55,6 +51,15 @@ function broadcast(dict) {
     }
 };
 
+function sendGroupMessage(receivers, message) {
+    for (const receiver of receivers) {
+        const client = getClientByUserId(receiver);
+        if (client) {
+            sendJSON(client.res, message);
+        }
+    }
+};
+
 function parseCookie(cookieString) {
     const result = {};
     if (!cookieString || typeof cookieString !== "string") return result;
@@ -67,6 +72,58 @@ function parseCookie(cookieString) {
 
     return result;
 }
+
+// ------------------------- GRUPLAR (DÜZELTİLDİ) -------------------------
+app.post('/groups', async (req, res) => {
+    const { cookie } = req.body;
+    const cookies = parseCookie(cookie);
+    const token = cookies?.token
+    if (!token) return res.status(400).json({ error: "Token gerekli" });
+
+    try {
+        const [rowsBySession] = await db.query(
+            "SELECT * FROM sessions WHERE token = ?",
+            [token]
+        );
+        if (!rowsBySession?.[0] || !rowsBySession[0]?.userId) return res.status(401).json({ error: "Gecersiz token" });
+
+        const currentUserId = rowsBySession[0].userId.toString();
+
+        // Üye olunan grupları çek
+        const [rows] = await db.query(
+            "SELECT id, name, users, admins FROM groups WHERE JSON_CONTAINS(users, ?)",
+            [`"${currentUserId}"`] // JSON_CONTAINS'e string olarak göndermek için çift tırnak eklenmeli
+        );
+
+        // Admin olunan grupları çek (Bu sorgu yukarıdakinin bir alt kümesi olabilir, ancak front-end'e ayrı ayrı göndermek için tutulur)
+        const [rowsAdmin] = await db.query(
+            "SELECT id, name, users, admins FROM groups WHERE JSON_CONTAINS(admins, ?)",
+            [`"${currentUserId}"`]
+        );
+
+        // Front-end'in 404 hatası almadan boş liste alabilmesi için
+        if (rows.length === 0 && rowsAdmin.length === 0) {
+            return res.json({ users: [], admins: [] });
+        }
+
+        // MySQL JSON alanlarını otomatik olarak parse etmeyebilir. Front-end'in istediği formata dönüştürülür.
+        const formatGroups = (groupRows) => groupRows.map(group => ({
+            ...group,
+            users: JSON.parse(group.users),
+            admins: JSON.parse(group.admins)
+        }));
+
+        res.json({
+            users: formatGroups(rows),
+            admins: formatGroups(rowsAdmin)
+        });
+
+    } catch (error) {
+        console.error("Grup çekme hatası:", error);
+        res.status(500).json({ error: "Sunucu hatası: Gruplar alınamadı" });
+    }
+});
+
 
 app.post('/me', async (req, res) => {
     const { cookie } = req.body;
@@ -104,7 +161,7 @@ app.get("/socket", async (req, res) => {
         if (!rowsBySession?.[0] || !rowsBySession[0]?.userId) return res.end();
 
         const client = { "res": res, "userId": rowsBySession?.[0]?.userId };
-        clients.push(client);
+        addClient(client); // addClient fonksiyonu zaten eski client'ı silip yenisini ekliyor
 
         console.log("Yeni SSE client! Toplam:", clients.length);
 
@@ -265,35 +322,56 @@ app.delete("/users/:id", async (req, res) => {
 // http://localhost:5000/messages?otherId=
 // Tüm mesajları çek (kullanıcılar arası)
 app.post("/messages", async (req, res) => {
-    console.log("req.body", req.body);
-    const { otherId, cookie } = req.body;
+    const { otherId, cookie, isGroup } = req.body;
     const cookies = parseCookie(cookie);
-    console.log("otherId", otherId);
-    console.log("cookie", cookies);
-    const userId = cookies?.token
-    console.log("userId", userId);
-    if (!userId || !otherId) return res.json([]);
+    const token = cookies?.token;
+
+    if (!token || !otherId) return res.json([]);
 
     try {
         const [rowsBySession] = await db.query(
             "SELECT * FROM sessions WHERE token = ?",
-            [userId]
+            [token]
         )
         if (!rowsBySession?.[0] || !rowsBySession[0]?.userId) return res.status(404).json({ error: "Kullanıcı oturumu bulunamadı" });
-        const [rows] = await db.query(
-            `SELECT * FROM messages 
-             WHERE (sender_id = ? AND receiver_id = ?) 
-                OR (sender_id = ? AND receiver_id = ?)
-             ORDER BY timestamp ASC`,
-            [rowsBySession[0].userId, otherId, otherId, rowsBySession[0].userId]
+
+        const currentUserId = rowsBySession[0].userId;
+
+        // 1. Önce bu otherId'nin bir grup olup olmadığını kontrol edelim.
+        const [groupCheck] = await db.query(
+            "SELECT id FROM groups WHERE id = ?",
+            [otherId]
         );
+
+        let query;
+        let params;
+
+        if (isGroup) {
+            // BU BİR GRUP MESAJIDIR: Alıcı ID'si (receiver_id) grubun ID'si olmalı
+            query = `SELECT * FROM messages 
+                     WHERE receiver_id = ? AND is_group = 1
+                     ORDER BY timestamp ASC`;
+            params = [otherId];
+
+        } else {
+            // BU BİREBİR SOHBETTİR: Gönderici/Alıcı ikilisinden biri olmalı
+            query = `SELECT * FROM messages 
+                     WHERE is_group = 0 AND 
+                     ((sender_id = ? AND receiver_id = ?) 
+                     OR (sender_id = ? AND receiver_id = ?))
+                     ORDER BY timestamp ASC`;
+            params = [currentUserId, otherId, otherId, currentUserId];
+        }
+        console.log("is grup::::", groupCheck.length > 0)
+        const [rows] = await db.query(query, params);
+        console.log(rows, currentUserId, otherId);
         res.json(rows);
+
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: "Mesajlar alınamadı" });
     }
 });
-
 app.post("/read_message", async (req, res) => {
     const { sender_id, cookie } = req.body;
     const cookies = parseCookie(cookie);
@@ -303,9 +381,9 @@ app.post("/read_message", async (req, res) => {
         [cookies.token]
     )
     if (!rowsBySession?.[0] || !rowsBySession[0]?.userId) return res.status(408).json({ error: "Kullanıcı oturumu bulunamadı" });
-    const otherId = rowsBySession[0].userId;
-    console.log("sender_id", sender_id, "otherId", otherId);
-    await db.query("UPDATE messages SET is_read = 1 WHERE receiver_id = ? AND sender_id = ? AND is_read = 0", [otherId, sender_id]);
+    const currentUserId = rowsBySession[0].userId;
+    console.log("sender_id", sender_id, "currentUserId", currentUserId);
+    await db.query("UPDATE messages SET is_read = 1 WHERE receiver_id = ? AND sender_id = ? AND is_read = 0", [currentUserId, sender_id]);
     res.json({ success: true });
 });
 
@@ -313,7 +391,7 @@ app.post("/read_message", async (req, res) => {
 app.post("/send_message", async (req, res) => {
     console.log("send post")
     try {
-        const { receiver_id, message, cookie } = req.body;
+        const { receiver_id, message, is_group, cookie } = req.body;
         if (!receiver_id || !message || !cookie)
             return res.status(400).json({ error: "Mesaj gerekli" });
         const cookies = parseCookie(cookie);
@@ -324,27 +402,271 @@ app.post("/send_message", async (req, res) => {
             [cookies.token]
         )
         if (!rowsBySession?.[0] || !rowsBySession[0]?.userId) return res.status(412).json({ error: "Kullanıcı oturumu bulunamadı" });
+
+        const senderId = rowsBySession[0].userId;
+
+        // Mesajı veritabanına kaydet
         await db.query(
-            "INSERT INTO messages (sender_id, receiver_id, text) VALUES (?, ?, ?)",
-            [rowsBySession[0].userId, receiver_id, message]
+            "INSERT INTO messages (sender_id, receiver_id, text, is_group, timestamp) VALUES (?, ?, ?, ?, NOW())",
+            [senderId, receiver_id, message, is_group]
         );
-        console.log("rowsBySession[0].userId", receiver_id);
-        const receiverClient = getClientByUserId(receiver_id);
-        if (receiverClient) {
-            console.log("alıcı client bulundu");
-            sendJSON(receiverClient.res, {
-                sender_id: rowsBySession[0].userId,
-                receiver_id,
-                text: message
-            });
+
+        // Eğer grup mesajıysa
+        if (is_group) {
+            // İlgili grubu bul
+            const [groupRows] = await db.query(
+                "SELECT users, admins FROM groups WHERE id = ?",
+                [receiver_id]
+            );
+
+            if (!groupRows?.[0]) return res.status(404).json({ error: "Grup bulunamadı" });
+
+            // Üyeler ve adminler dahil, mesajı alacak tüm kullanıcı ID'leri
+            const groupMembers = [...JSON.parse(groupRows[0].users), ...JSON.parse(groupRows[0].admins)];
+            const uniqueMembers = [...new Set(groupMembers)].map(String);
+
+            // Göndericiyi listeden çıkar (kendi kendine bildirim göndermemek için, SSE zaten kendi mesajını alacaktır)
+            const receivers = uniqueMembers.filter(id => id !== String(senderId));
+
+            // SSE ile alıcılara gönder
+            const sseMessage = {
+                sender_id: senderId,
+                receiver_id: receiver_id,
+                text: message,
+                is_group: 1
+            };
+
+            for (const memberId of receivers) {
+                const memberClient = getClientByUserId(parseInt(memberId, 10)); // ID'ler number ise parse et
+                if (memberClient) {
+                    sendJSON(memberClient.res, sseMessage);
+                }
+            }
+
+        } else {
+            // Birebir mesaj
+            const receiverClient = getClientByUserId(receiver_id);
+            const sseMessage = {
+                sender_id: senderId,
+                receiver_id: receiver_id,
+                text: message,
+                is_group: 0
+            };
+
+            if (receiverClient) {
+                console.log("alıcı client bulundu");
+                sendJSON(receiverClient.res, sseMessage);
+            }
         }
 
-        res.json({ sender_id: rowsBySession[0].userId, receiver_id, text: message });
+        // Frontend'in beklemediği ancak yine de gönderebileceği başarılı cevap
+        res.json({ sender_id: senderId, receiver_id, text: message, is_group: is_group });
     } catch (err) {
         console.error(err);
         res.status(500).json({ success: false, error: "Mesaj gönderilemedi" });
     }
 });
+
+// ------------------------- GRUP YÖNETİMİ -------------------------
+
+// Üyeyi kullanıcı seviyesine indir (Adminlikten Çıkarmanın bir parçasıdır)
+app.post('/remove_member_admin', async (req, res) => {
+    const { groupId, userId, cookie } = req.body;
+    const cookies = parseCookie(cookie);
+    if (!cookies?.token) return res.status(408).json({ error: "Kullanıcı oturumu bulunamadı" });
+
+    try {
+        const [rowsBySession] = await db.query(
+            "SELECT * FROM sessions WHERE token = ?",
+            [cookies.token]
+        );
+        if (!rowsBySession?.[0] || !rowsBySession[0]?.userId) return res.status(401).json({ error: "Gecersiz token" });
+        const currentUserId = rowsBySession[0].userId.toString();
+        const targetUserId = String(userId);
+
+        // 1. Admin yetkisi kontrolü (Mevcut kullanıcı admin olmalı)
+        const [groupRows] = await db.query(
+            "SELECT id, admins FROM groups WHERE id = ? AND JSON_CONTAINS(admins, ?)",
+            [groupId, `"${currentUserId}"`]
+        );
+        if (!groupRows?.[0]) return res.status(403).json({ success: false, error: "Yetkisiz işlem veya Grup bulunamadı." });
+
+        const groupAdmins = JSON.parse(groupRows[0].admins);
+
+        // 2. Admin sayısı kontrolü (Admin sayısı 1'in altına düşemez)
+        if (groupAdmins.length === 1 && groupAdmins.map(String).includes(targetUserId)) {
+            return res.status(400).json({ success: false, error: "Grupta en az bir admin bulunmalıdır." });
+        }
+
+        // 3. Admin listesinden kullanıcıyı kaldır
+        await db.query("UPDATE groups SET admins = JSON_REMOVE(admins, REPLACE(JSON_UNQUOTE(JSON_SEARCH(admins, 'one', ?)), '\"', '')) WHERE id = ?", [targetUserId, groupId]);
+
+        res.json({ success: true, message: "Kullanıcı adminlikten çıkarıldı." });
+
+    } catch (err) {
+        console.error("Admin çıkarma hatası:", err);
+        res.status(500).json({ success: false, error: "Sunucu hatası: Adminlikten çıkarılamadı." });
+    }
+});
+
+
+// Üyeyi admin yapar (Sadece mevcut adminler yapabilir)
+app.post('/set_member_admin', async (req, res) => {
+    const { groupId, userId, cookie } = req.body;
+    const cookies = parseCookie(cookie);
+    if (!cookies?.token) return res.status(408).json({ error: "Kullanıcı oturumu bulunamadı" });
+
+    try {
+        const [rowsBySession] = await db.query(
+            "SELECT * FROM sessions WHERE token = ?",
+            [cookies.token]
+        );
+        if (!rowsBySession?.[0] || !rowsBySession[0]?.userId) return res.status(401).json({ error: "Gecersiz token" });
+        const currentUserId = rowsBySession[0].userId.toString();
+
+        // Admin yetkisi kontrolü
+        const [groupRows] = await db.query(
+            "SELECT * FROM groups WHERE id = ? AND JSON_CONTAINS(admins, ?)",
+            [groupId, `"${currentUserId}"`]
+        );
+        if (!groupRows?.[0]) return res.status(403).json({ success: false, error: "Yetkisiz işlem veya Grup bulunamadı." });
+
+        const targetUserId = String(userId);
+
+        // Kullanıcının admin listesinde olup olmadığını kontrol et
+        const groupAdmins = JSON.parse(groupRows[0].admins);
+        if (groupAdmins.map(String).includes(targetUserId)) {
+            return res.status(400).json({ success: false, error: "Kullanıcı zaten admin." });
+        }
+
+        // Admin olarak ekle
+        await db.query("UPDATE groups SET admins = JSON_ARRAY_APPEND(admins, '$', ?) WHERE id = ?", [targetUserId, groupId]);
+
+        res.json({ success: true, message: "Kullanıcı admin yapıldı." });
+
+    } catch (err) {
+        console.error("Admin yapma hatası:", err);
+        res.status(500).json({ success: false, error: "Kullanıcı admin yapılamadı." });
+    }
+})
+
+// Grup oluşturma
+app.post('/create_groups', async (req, res) => {
+    try {
+        const { name, users, cookie } = req.body;
+        const cookies = parseCookie(cookie);
+        if (!cookies?.token) return res.status(408).json({ error: "Kullanıcı oturumu bulunamadı" });
+        const [rowsBySession] = await db.query(
+            "SELECT * FROM sessions WHERE token = ?",
+            [cookies.token]
+        )
+        if (!rowsBySession?.[0] || !rowsBySession[0]?.userId) return res.status(408).json({ error: "Kullanıcı oturumu bulunamadı" });
+
+        const currentUserId = rowsBySession[0].userId.toString();
+
+        // 1. Oluşturan kullanıcıyı otomatik admin yap
+        const adminUsers = [currentUserId];
+
+        // 2. user listesinden adminleri ve kopyaları çıkar
+        const finalUsers = users.map(String).filter(id => id !== currentUserId);
+
+        const [result] = await db.query(
+            "INSERT INTO groups (name, users, admins) VALUES (?, ?, ?)",
+            [name, JSON.stringify(finalUsers), JSON.stringify(adminUsers)]
+        );
+        res.json({ success: true, id: result.insertId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, error: "Grup olusturulamadi" });
+    }
+})
+
+// Üye ekle (Sadece Adminler yapabilir)
+app.post('/add_member', async (req, res) => {
+    const { group_id, user_id, cookie } = req.body;
+    const cookies = parseCookie(cookie);
+    if (!cookies?.token) return res.status(408).json({ error: "Kullanıcı oturumu bulunamadı" });
+
+    try {
+        const [rowsBySession] = await db.query(
+            "SELECT * FROM sessions WHERE token = ?",
+            [cookies.token]
+        )
+        if (!rowsBySession?.[0] || !rowsBySession[0]?.userId) return res.status(401).json({ error: "Gecersiz token" });
+        const currentUserId = rowsBySession[0].userId.toString();
+
+        // Admin yetkisi kontrolü
+        const [groupRows] = await db.query(
+            "SELECT * FROM groups WHERE id = ? AND JSON_CONTAINS(admins, ?)",
+            [group_id, `"${currentUserId}"`] // JSON_CONTAINS için çift tırnak önemli
+        );
+
+        if (!groupRows?.[0]) return res.status(403).json({ success: false, error: "Yetkisiz işlem: Sadece adminler üye ekleyebilir." });
+
+        const targetUserId = String(user_id);
+
+        // 1. Hedef kullanıcının zaten üye (users) olup olmadığını kontrol et
+        const groupUsers = JSON.parse(groupRows[0].users);
+        const groupAdmins = JSON.parse(groupRows[0].admins);
+
+        if (groupUsers.map(String).includes(targetUserId) || groupAdmins.map(String).includes(targetUserId)) {
+            return res.status(400).json({ success: false, error: "Kullanıcı zaten grupta." });
+        }
+
+        // 2. Üyeyi ekle
+        await db.query('UPDATE groups SET users = JSON_ARRAY_APPEND(users, "$", ?) WHERE id = ?', [targetUserId, group_id]);
+
+        res.json({ success: true, message: "Kullanıcı gruba eklendi." });
+    } catch (err) {
+        console.error("Üye ekleme hatası:", err);
+        res.status(500).json({ success: false, error: "Sunucu hatası: Kullanıcı eklenemedi." });
+    }
+})
+
+// Üye çıkarma (Eksik: Sadece Adminler yapabilir)
+app.post('/remove_member', async (req, res) => {
+    const { group_id, user_id, cookie } = req.body;
+    const cookies = parseCookie(cookie);
+    if (!cookies?.token) return res.status(408).json({ error: "Kullanıcı oturumu bulunamadı" });
+
+    try {
+        const [rowsBySession] = await db.query(
+            "SELECT * FROM sessions WHERE token = ?",
+            [cookies.token]
+        )
+        if (!rowsBySession?.[0] || !rowsBySession[0]?.userId) return res.status(401).json({ error: "Gecersiz token" });
+        const currentUserId = rowsBySession[0].userId.toString();
+        const targetUserId = String(user_id);
+
+        // 1. Admin yetkisi kontrolü
+        const [groupRows] = await db.query(
+            "SELECT users, admins FROM groups WHERE id = ? AND JSON_CONTAINS(admins, ?)",
+            [group_id, `"${currentUserId}"`]
+        );
+        if (!groupRows?.[0]) return res.status(403).json({ success: false, error: "Yetkisiz işlem: Sadece adminler üye çıkarabilir." });
+
+        // 2. Çıkarılacak kullanıcı admin ise, adminlikten çıkarılması gerekir.
+        const groupAdmins = JSON.parse(groupRows[0].admins);
+        if (groupAdmins.map(String).includes(targetUserId)) {
+            return res.status(400).json({ success: false, error: "Kullanıcı admin olduğu için önce adminlikten çıkarılmalıdır." });
+        }
+
+        // 3. Kendisini gruptan atmasını engelle (Adminin kendisini atması için farklı bir API olmalı)
+        if (targetUserId === currentUserId) {
+            return res.status(400).json({ success: false, error: "Kendinizi gruptan atamazsınız." });
+        }
+
+        // 4. Üyeler listesinden kaldır (users)
+        await db.query("UPDATE groups SET users = JSON_REMOVE(users, REPLACE(JSON_UNQUOTE(JSON_SEARCH(users, 'one', ?)), '\"', '')) WHERE id = ?", [targetUserId, group_id]);
+
+        res.json({ success: true, message: "Kullanıcı gruptan çıkarıldı." });
+
+    } catch (err) {
+        console.error("Üye çıkarma hatası:", err);
+        res.status(500).json({ success: false, error: "Sunucu hatası: Kullanıcı çıkarılamadı." });
+    }
+})
+
 
 // Mesaj sil
 app.delete("/messages/:id", async (req, res) => {
