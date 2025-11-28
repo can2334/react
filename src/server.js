@@ -25,13 +25,13 @@ const generateRandomString = (length = 32) => {
     return crypto.randomBytes(length).toString('hex');
 };
 
-const clients = []; // ✅ DÜZELTME: Başlangıçta boş bir dizi olmalı.
+const clients = []; // Başlangıçta boş bir dizi olmalı.
 
 // Eski: function getClientByUserId(userId) { ... }
 // Yeni:
 
 function getClientByUserId(userId) {
-    // 💡 DÜZELTME: Karşılaştırmadan önce userId'yi string'e çevir.
+    // DÜZELTME: Karşılaştırmadan önce userId'yi string'e çevir.
     const targetId = userId.toString();
     // `clients` dizisi artık boş başladığı için bu arama güvenli.
     return clients.find(c => c.userId?.toString() === targetId) || null;
