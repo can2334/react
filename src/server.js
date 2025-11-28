@@ -25,12 +25,19 @@ const generateRandomString = (length = 32) => {
     return crypto.randomBytes(length).toString('hex');
 };
 
-const clients = [" "];
+const clients = []; // ✅ DÜZELTME: Başlangıçta boş bir dizi olmalı.
+
+// Eski: function getClientByUserId(userId) { ... }
+// Yeni:
 
 function getClientByUserId(userId) {
-    return clients.find(c => c.userId === userId) || null;
+    // 💡 DÜZELTME: Karşılaştırmadan önce userId'yi string'e çevir.
+    const targetId = userId.toString();
+    // `clients` dizisi artık boş başladığı için bu arama güvenli.
+    return clients.find(c => c.userId?.toString() === targetId) || null;
 };
 
+// addClient fonksiyonunu da temizleyelim (clients'ın doğru tanımlandığını varsayarak)
 function addClient(client) {
     const exClientIndex = clients.findIndex(c => c.userId === client.userId);
 
@@ -324,15 +331,24 @@ app.post("/send_message", async (req, res) => {
             [rowsBySession[0].userId, receiver_id, message]
         );
         console.log("rowsBySession[0].userId", receiver_id);
+
+        // receiver_id'nin tipini kontrol etmek için. MySQL'den gelen userId number, req.body'den gelen receiver_id string/number olabilir.
+        // getClientByUserId zaten toString() ile karşılaştırdığı için receiver_id'yi değiştirmeye gerek yok.
         const receiverClient = getClientByUserId(receiver_id);
+
         if (receiverClient) {
             console.log("alıcı client bulundu");
+
+            // 💡 KRİTİK DÜZELTME: Mesajı gönderirken, mesaja bir ID eklemek, client tarafının
+            // mesajları ilk yüklemede ve anlık yüklemede ayırt etmesini kolaylaştırır.
+            // Ama şimdilik sadece gönderen ID'lerinin doğru olduğundan emin olalım.
             sendJSON(receiverClient.res, {
-                sender_id: rowsBySession[0].userId,
-                receiver_id,
+                sender_id: rowsBySession[0].userId, // Bu number (veya MySQL'den gelen tip)
+                receiver_id: Number(receiver_id),   // Bu da number olmalı
                 text: message
             });
         }
+        // ...
 
         res.json({ sender_id: rowsBySession[0].userId, receiver_id, text: message });
     } catch (err) {

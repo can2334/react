@@ -31,9 +31,10 @@ const getCookie = (name: string): string | null => {
     return null;
 };
 
-const generateUserId = (): string => {
-    return `user_${Math.random().toString(36).substr(2, 9)}_${Date.now()}`;
-};
+// Bu fonksiyon kullanılmadığı için sadeleştirildi, ancak korunabilir.
+// const generateUserId = (): string => {
+//     return `user_${Math.random().toString(36).substr(2, 9)}_${Date.now()}`;
+// };
 
 const API_URL = "http://localhost:5000";
 
@@ -48,16 +49,8 @@ const ChatButton: React.FC = () => {
     const [availableUsers, setAvailableUsers] = useState<User[]>([]);
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
+    // #1 Kullanıcı ID'sini çek (Önce çalışmalı)
     // ----------------- Kullanıcı ID -----------------
-    // useEffect(() => {
-    //     let uid = getCookie("userId");
-    //     if (!uid) {
-    //         uid = generateUserId();
-    //         setCookie("userId", uid, 365);
-    //     }
-    //     setCurrentUserId(uid);
-    // }, []);
-
     useEffect(() => {
         fetch(`${API_URL}/me`, {
             method: "POST",
@@ -65,59 +58,83 @@ const ChatButton: React.FC = () => {
             body: JSON.stringify({ cookie: document.cookie }),
         })
             .then(res => res.json())
-            .then(data => setCurrentUserId(data[0]?.id.toString()))
+            .then(data => {
+                const fetchedId = data[0]?.id;
+
+                // 💡 KRİTİK DÜZELTME: ID'yi var olduğunda string'e zorla
+                if (fetchedId) {
+                    setCurrentUserId(fetchedId.toString());
+                    console.log("Kullanıcı ID yüklendi:", fetchedId.toString()); // Kontrol et
+                }
+            })
             .catch(err => console.error("Kullanıcı ID alınamadı:", err));
     }, []);
 
-    // ----------------- Kullanıcıları çek -----------------
+    // #2 Kullanıcıları çek (currentUserId yüklendikten sonra çalışmalı)
     useEffect(() => {
+        // currentUserId yoksa bekle
+        if (!currentUserId) return;
+
         fetch(`${API_URL}/users`)
             .then(res => res.json())
             .then(data => {
                 // Kendi kullanıcıyı filtrele
-                const filteredUsers = data.filter((user: User) => user.id !== currentUserId);
+                const filteredUsers = data.filter((user: User) => user.id.toString() !== currentUserId);
                 setAvailableUsers(filteredUsers);
             })
             .catch(err => console.error("Kullanıcılar alınamadı:", err));
-    }, []);
+    }, [currentUserId]); // currentUserId yüklendiğinde tekrar çalış
 
+    // #3 SSE Bağlantısı (Mesajları Anlık Al)
     useEffect(() => {
         if (!currentUserId) return;
         const token = getCookie("token");
-        const ev = new EventSource("http://localhost:5000/socket?token=" + token);
+        const ev = new EventSource(`${API_URL}/socket?token=${token}`);
+
+        // chatbuttons.tsx ~115. satır civarı (#3 SSE Bağlantısı içindeki ev.onmessage)
 
         ev.onmessage = (event) => {
-            console.log("HAM GELEN:", event.data);
+            // 🔥 Bu konsolu hata ayıklama bittiğinde silebilirsin
+            // console.log("🔥 SSE'den Gelen HAM Veri:", event.data); 
+
+            // Düz metinleri JSON'a çevirmeye çalış
             try {
                 const data = JSON.parse(event.data);
-                console.log("SSE DATA:", data);
-                if (!data) return;
 
-                // // Eğer gelen mesaj bu konuşmaya aitse UI'a ekle
-                // if (selectedUser && (
-                //     (data.sender_id?.toString() === selectedUser.id.toString() &&
-                //         data.receiver_id?.toString() === currentUserId) ||
-                //     (data.receiver_id?.toString() === selectedUser.id.toString() &&
-                //         data.sender_id?.toString() === currentUserId)
-                // )) {
+                // 1. KRİTİK KONTROL: Eğer gelen mesaj sadece bağlantı bildirimi ise (baglisin), işleme devam etme.
+                if (data.message === "baglisin") {
+                    // console.log("SSE Bağlantısı başarılı: baglisin");
+                    return;
+                }
+
+                // 2. Gelen verinin bir mesaj objesi olduğundan emin ol (text, sender_id ve receiver_id alanları olmalı)
+                if (!data || !data.text || !data.sender_id || !data.receiver_id) {
+                    // Bu uyarı, sadece "baglisin" olmayan, ama eksik alanlı garip veriler gelirse görünür.
+                    console.warn("SSE: Gelen veri eksik/mesaj değil:", data);
+                    return;
+                }
+
+                // 3. Her gelen DOĞRU formatlı mesajı koşulsuz olarak global state'e ekle
                 setMessages(prev => [...prev, data]);
-                // }
 
-            }
-            catch (e) {
-                console.error("SSE JSON Parse error:", e);
+            } catch (e) {
+                // console.error("SSE JSON Parse error:", e, "Veri:", event.data);
             }
         };
 
+        // Bağlantı koparsa veya bileşen kapanırsa temizlik yap
         ev.onerror = err => {
             console.error("SSE error:", err);
-            // Bağlantı koparsa tekrar bağlanmaya çalışır
         };
 
-    }, [selectedUser, currentUserId]);
+        // Cleanup fonksiyonu ile bağlantı kirliliğini önle
+        return () => {
+            ev.close();
+        };
 
+    }, [currentUserId]); // selectedUser'ı dependency'den kaldırdık, çünkü mesajı koşulsuz ekliyoruz.
 
-    // ----------------- Mesajları çek -----------------
+    // #4 Mesajları Çek (İlk Yükleme)
     useEffect(() => {
         if (!selectedUser || !currentUserId) return;
 
@@ -152,6 +169,7 @@ const ChatButton: React.FC = () => {
         })
             .then(res => res.json())
             .then((newMessage: Message) => {
+                // Kendi gönderdiğimiz mesajı hemen state'e ekle
                 setMessages(prev => [...prev, newMessage]);
                 setMessageInput("");
                 if (!activeChats.find(u => u.id === selectedUser.id)) {
@@ -160,18 +178,30 @@ const ChatButton: React.FC = () => {
             })
             .catch(err => console.error("Mesaj gönderilemedi:", err));
     };
-    console.log(messages);
 
-    // ----------------- Mesaj filtreleme -----------------
+    // ----------------- Mesaj filtreleme (SORUNUN KAYNAĞI) -----------------
+    // Bu kısım, selectedUser veya currentUserId değiştiğinde otomatik olarak yeniden hesaplanır.
     const filteredMessages = messages.filter(
-        msg =>
-            (msg.sender_id.toString() === currentUserId && msg.receiver_id.toString() === selectedUser?.id.toString()) ||
-            (msg.receiver_id.toString() === currentUserId && msg.sender_id.toString() === selectedUser?.id.toString())
+        msg => {
+            const selectedId = selectedUser?.id.toString();
+            if (!selectedId) return false;
+
+            // ID'lerin mutlak string olduğundan emin ol
+            const senderId = msg.sender_id?.toString();
+            const receiverId = msg.receiver_id?.toString();
+
+            // Sohbeti kiminle yaptığımızı kontrol et
+            const isOutgoing = senderId === currentUserId && receiverId === selectedId;
+            const isIncoming = receiverId === currentUserId && senderId === selectedId;
+
+            return isOutgoing || isIncoming;
+        }
     );
+
     // ----------------- Unread count -----------------
-    const totalUnreadCount = messages.filter(msg => msg.receiver_id.toString() === currentUserId && !msg.is_read).length;
+    const totalUnreadCount = messages.filter(msg => msg.receiver_id?.toString() === currentUserId && !msg.is_read).length;
     const getUnreadCountForUser = (userId: string | number) =>
-        messages.filter(msg => msg.sender_id.toString() === userId.toString() && msg.receiver_id.toString() === currentUserId && !msg.is_read).length;
+        messages.filter(msg => msg.sender_id?.toString() === userId.toString() && msg.receiver_id?.toString() === currentUserId && !msg.is_read).length;
 
     // ----------------- Kullanıcı seç -----------------
     const selectNewUser = (user: User) => {
@@ -183,7 +213,7 @@ const ChatButton: React.FC = () => {
     // ----------------- Scroll -----------------
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }, [messages]);
+    }, [filteredMessages]); // Sadece filteredMessages değiştiğinde scroll et
 
     // ----------------- Render -----------------
     return (
@@ -249,18 +279,13 @@ const ChatButton: React.FC = () => {
                             {showUserSelector && (
                                 <div style={{ position: "absolute", top: "calc(100% + 5px)", left: 15, right: 15, backgroundColor: "white", boxShadow: "0 8px 24px rgba(0,0,0,0.12)", borderRadius: 10, zIndex: 1000, border: "1px solid #e8e8e8", maxHeight: 200, overflowY: "auto" }}>
                                     {availableUsers
-                                        // 1. ADIM: Kendimizi listeden çıkarıyoruz (String çevirimi yaparak garantiye alıyoruz)
                                         .filter(user => user.id.toString() !== currentUserId)
-
-                                        // 2. ADIM: Zaten açık olan sohbetleri çıkarıyoruz (Eski kodun)
                                         .filter(user => !activeChats.find(u => u.id === user.id))
-
                                         .map(user => (
                                             <div key={user.id} onClick={() => selectNewUser(user)} style={{ padding: "14px 16px", cursor: "pointer", borderBottom: "1px solid #f0f0f0", fontSize: 14 }}>
                                                 {user.username}
                                             </div>
-                                        ))
-                                    }
+                                        ))}
                                 </div>
                             )}
                         </div>
@@ -312,8 +337,9 @@ const ChatButton: React.FC = () => {
                                 onChange={(e) => setMessageInput(e.target.value)}
                                 onKeyDown={(e) => e.key === "Enter" && sendMessage()}
                                 style={{ flex: 1, padding: "10px 14px", borderRadius: 16, border: "1px solid #ccc", outline: "none", fontSize: 14 }}
+                                disabled={!selectedUser} // Kullanıcı seçilmeden yazılamaz
                             />
-                            <button onClick={sendMessage} style={{ padding: "10px 16px", backgroundColor: "#667eea", color: "white", borderRadius: 16, border: "none", cursor: "pointer", fontWeight: 600 }}>Gönder</button>
+                            <button onClick={sendMessage} style={{ padding: "10px 16px", backgroundColor: "#667eea", color: "white", borderRadius: 16, border: "none", cursor: "pointer", fontWeight: 600 }} disabled={!selectedUser}>Gönder</button>
                         </div>
                     </div>
                 </div>
