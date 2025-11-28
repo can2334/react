@@ -12,6 +12,7 @@ export default function DashboardLayout() {
             <main style={{ padding: "20px" }}>
                 {/* Outlet sayesinde nested route'lar burada render edilir */}
                 <Outlet />
+
             </main>
         </div>
     );

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import "../css/App.css";
 import { Log } from "../interface/home";
+import ChatButton from "../components/chatbuttons"; // <-- ChatButton import
 
 const Home: React.FC = () => {
     const [logs, setLogs] = useState<Log[]>([]);
@@ -68,6 +69,7 @@ const Home: React.FC = () => {
                     </tbody>
                 </table>
             </div>
+            <ChatButton />
 
         </div>
     );
